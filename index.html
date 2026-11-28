@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>作業基盤アトラス</title>
+<style>
+:root{color-scheme:light;--page:#f4f2ec;--surface:#fcfcfb;--ink:#0b0b0b;--ink-2:#52514e;--axis:#c3c2b7;--accent:#2a78d6;--bad:#b42323}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#fff;--ink-2:#c3c2b7;--axis:#383835;--accent:#86b6ef;--bad:#f08a8a}}
+:root[data-theme="dark"]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#fff;--ink-2:#c3c2b7;--axis:#383835;--accent:#86b6ef;--bad:#f08a8a}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--page);color:var(--ink);font:15px/1.6 "BIZ UDPGothic","Hiragino Sans","Yu Gothic UI","Meiryo",system-ui,sans-serif;padding:16px}
+form{background:var(--surface);border:1px solid var(--axis);border-radius:14px;padding:26px 24px;width:min(380px,100%)}
+h1{margin:0 0 4px;font-size:19px}
+p{margin:0 0 16px;color:var(--ink-2);font-size:13px}
+label{display:block;font-size:13px;color:var(--ink-2);margin-bottom:6px}
+input[type=password]{width:100%;font:inherit;padding:10px 12px;min-height:44px;border:1px solid var(--axis);border-radius:9px;background:var(--surface);color:var(--ink)}
+.row{display:flex;align-items:center;gap:8px;margin:12px 0 16px;font-size:13px;color:var(--ink-2)}
+.row input{width:18px;height:18px}
+button{width:100%;min-height:44px;font:inherit;font-weight:700;border:0;border-radius:9px;background:var(--ink);color:var(--surface);cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.msg{min-height:1.4em;margin:10px 0 0;font-size:13px;color:var(--bad)}
+</style>
+</head>
+<body>
+<form id="f" autocomplete="off">
+  <h1>作業基盤アトラス</h1>
+  <p>中身は暗号化してある。パスフレーズを入れて開く。</p>
+  <label for="pw">パスフレーズ</label>
+  <input id="pw" type="password" autocomplete="current-password" required>
+  <div class="row"><input id="remember" type="checkbox" checked><label for="remember" style="margin:0">この端末で記憶する</label></div>
+  <button id="go" type="submit">開く</button>
+  <div class="msg" id="msg" role="alert"></div>
+</form>
+<script>
+"use strict";
+const KEY = "hm-pages-key";            // 記憶するのはパスフレーズではなく、導いた鍵（raw・base64）
+const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+const enc = new TextEncoder();
+let envelope = null;
+async function getEnvelope() {
+  if (!envelope) { const r = await fetch("app.enc", {cache: "no-store"}); if (!r.ok) throw new Error("暗号文を取得できない（" + r.status + "）"); envelope = await r.json(); }
+  if (envelope.v !== 1 || envelope.kdf !== "PBKDF2-SHA256" || envelope.iter < 600000) throw new Error("暗号文の形式が違う");
+  return envelope;
+}
+async function deriveRaw(pw, e) {
+  const base = await crypto.subtle.importKey("raw", enc.encode(pw), "PBKDF2", false, ["deriveBits"]);
+  return new Uint8Array(await crypto.subtle.deriveBits({name: "PBKDF2", hash: "SHA-256", salt: b64(e.salt), iterations: e.iter}, base, 256));
+}
+async function open(raw, e) {
+  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+  const plain = await crypto.subtle.decrypt({name: "AES-GCM", iv: b64(e.iv)}, key, b64(e.ct));
+  let html = new TextDecoder().decode(plain);
+  // 見出しに「鍵をかける」を足す（記憶した鍵を消して解錠画面へ戻る）
+  html = html.replace('<button type="button" class="btn" id="themeBtn"', '<button type="button" class="btn" id="lockBtn" aria-label="この端末の記憶を消して閉じる">鍵をかける</button> <button type="button" class="btn" id="themeBtn"')
+             .replace("</body>", '<script>document.getElementById("lockBtn").onclick=function(){try{localStorage.removeItem("' + KEY + '")}catch(e){}location.reload()};<\/script></body>');
+  document.open(); document.write(html); document.close();
+}
+const toB64 = (u) => btoa(String.fromCharCode(...u));
+(async () => {
+  let saved = null; try { saved = localStorage.getItem(KEY); } catch (e) { /* 記憶なしで動く */ }
+  if (saved) { try { await open(b64(saved), await getEnvelope()); return; } catch (e) { try { localStorage.removeItem(KEY); } catch (_) {} } }
+  document.getElementById("pw").focus();
+})();
+document.getElementById("f").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const go = document.getElementById("go"), msg = document.getElementById("msg");
+  go.disabled = true; go.textContent = "開いています…"; msg.textContent = "";
+  try {
+    const remember = document.getElementById("remember").checked;   // open() で画面が入れ替わる前に読む
+    const e = await getEnvelope(), raw = await deriveRaw(document.getElementById("pw").value, e);
+    await open(raw, e);                                                // 解けたときだけ記憶する（失敗は catch へ）
+    if (remember) { try { localStorage.setItem(KEY, toB64(raw)); } catch (_) {} }
+  } catch (err) {
+    msg.textContent = err && err.name === "OperationError" ? "パスフレーズが違う" : (err.message || "開けなかった");
+    go.disabled = false; go.textContent = "開く";
+  }
+});
+</script>
+</body>
+</html>
